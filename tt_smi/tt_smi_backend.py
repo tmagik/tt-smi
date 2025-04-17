@@ -10,12 +10,12 @@ This is the backend of tt-smi.
 import os
 import re
 import sys
+import time
 import datetime
 import pkg_resources
 from tt_smi import log
 from pathlib import Path
-from rich.text import Text
-from pyluwen import PciChip
+from pyluwen import PciChip, run_wh_ubb_ipmi_reset, run_ubb_wait_for_driver_load
 from rich.table import Table
 from tt_smi import constants
 from rich import get_console
@@ -702,3 +702,87 @@ def pci_board_reset(list_of_boards: List[int], reinit=False):
                 CMD_LINE_COLOR.ENDC,
             )
             sys.exit(1)
+
+def timed_wait(seconds):
+    print("\033[93mWaiting for {} seconds: 0\033[0m".format(seconds), end='')
+    sys.stdout.flush()
+
+    for i in range(1, seconds + 1):
+        time.sleep(1)
+        # Move cursor back and overwrite the number
+        print("\r\033[93mWaiting for {} seconds: {}\033[0m".format(seconds, i), end='')
+        sys.stdout.flush()
+    print()
+
+def wh_ubb_reset(reinit=True):
+    """
+    Reset the WH UBBs with the following steps:
+    1. Send A3 arc msg to all chips (else might have i2c vcore hangs)
+    2. Wait for 5s
+    3. Reset the UBBs with ipmi command
+    4. Wait for 30s
+    5. Reinit all chips
+    """
+    reset_wh_pci_idx = []
+    chip_list = []
+    for pci_idx in range(0,32):
+        try:
+            chip = PciChip(pci_interface=pci_idx)
+        except Exception as e:
+            print(
+                CMD_LINE_COLOR.RED,
+                f"Error accessing WH chip at PCI index {pci_idx}!",
+                CMD_LINE_COLOR.ENDC,
+            )
+            # Exit the loop to go to the next chip
+            continue
+        if chip.as_wh():
+            reset_wh_pci_idx.append(pci_idx)
+            chip_list.append(chip)
+
+    for chip in chip_list:
+        # Send A3 arc msg to all chips (else might have i2c vcore hangs)
+        chip.as_wh().arc_msg(0xA3, wait_for_done=False)
+        print(
+            CMD_LINE_COLOR.PURPLE,
+            f"Putting WH chip at PCI index {pci_idx} into an A3 state",
+            CMD_LINE_COLOR.ENDC,
+        )
+
+    # Wait for 5s
+    timed_wait(5)
+
+    ubb_num = "0xF"
+    dev_num = "0xFF"
+    op_mode = "0x0"
+    reset_time = "0xF"
+    print(
+        CMD_LINE_COLOR.PURPLE,
+        f"Resetting WH UBBs",
+        CMD_LINE_COLOR.ENDC,
+    )
+    run_wh_ubb_ipmi_reset(ubb_num, dev_num, op_mode, reset_time)
+    timed_wait(30)
+    run_ubb_wait_for_driver_load()
+    print(
+        CMD_LINE_COLOR.BLUE,
+        f"Driver loaded",
+        CMD_LINE_COLOR.ENDC,
+    )
+
+    print(
+        CMD_LINE_COLOR.PURPLE,
+        f"Re-initializing boards after reset....",
+        CMD_LINE_COLOR.ENDC,
+    )
+    try:
+        chips = detect_chips_with_callback()
+    except Exception as e:
+        print(
+            CMD_LINE_COLOR.RED,
+            f"Error when re-initializing chips!\n {e}",
+            CMD_LINE_COLOR.ENDC,
+        )
+        sys.exit(1)
+
+
